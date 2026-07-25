@@ -1,18 +1,31 @@
-from core.client import FMSClient
+import requests
 
-client = FMSClient()
+from config import BASE_URL, HEADERS
+
+TRACKING_API = BASE_URL + "/api/fleet_order/order/detail/tracking_info"
 
 
-def tracking(shipment):
+def get_tracking(shipment_id):
+    """
+    Lấy tracking của 1 shipment
+    """
 
-    return client.get(
+    params = {
+        "shipment_id": shipment_id
+    }
 
-        "/api/xxxx/tracking_info",
-
-        {
-
-            "shipment_id": shipment
-
-        }
-
+    r = requests.get(
+        TRACKING_API,
+        headers=HEADERS,
+        params=params,
+        timeout=30
     )
+
+    r.raise_for_status()
+
+    data = r.json()
+
+    if data["retcode"] != 0:
+        raise Exception(data["message"])
+
+    return data
