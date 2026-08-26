@@ -1,30 +1,31 @@
-import os
-
 from config import BASE_URL
 from core.spx_request import spx_get
 
 
-TRIP_TRACKING_PATH = os.getenv(
-    "TRIP_TRACKING_PATH",
-    "/api/admin/transportation/trip/history/tracking",
-)
-
-TRIP_TRACKING_API = (
+SEAL_API = (
     BASE_URL
-    + TRIP_TRACKING_PATH
+    + "/api/admin/transportation/trip/seal/detail"
 )
 
 
-def get_trip_tracking(
-    trip_id
+def get_trip_seal_detail(
+    trip_id,
+    sequence_number,
+    station,
 ):
     params = {
         "trip_id":
-            trip_id
+            trip_id,
+
+        "sequence_number":
+            sequence_number,
+
+        "station":
+            station,
     }
 
     response = spx_get(
-        TRIP_TRACKING_API,
+        SEAL_API,
         params=params,
         timeout=30,
     )
@@ -37,7 +38,7 @@ def get_trip_tracking(
         raise RuntimeError(
             data.get(
                 "message",
-                "Unknown SPX tracking error",
+                "Unknown seal detail error",
             )
         )
 

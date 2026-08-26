@@ -1,7 +1,11 @@
-import requests
-from config import BASE_URL, HEADERS
+from config import BASE_URL
+from core.spx_request import spx_get
 
-TRIP_API = BASE_URL + "/api/admin/transportation/trip/history/loading/list"
+
+TRIP_API = (
+    BASE_URL
+    + "/api/admin/transportation/trip/history/loading/list"
+)
 
 
 def get_trip(
@@ -10,24 +14,48 @@ def get_trip(
     actual_unloaded_sequence_number=0,
     page=1,
     count=24,
-    trip_type="pending"
+    trip_type="pending",
 ):
     params = {
-        "trip_id": trip_id,
-        "pageno": page,
-        "count": count,
-        "unloaded_sequence_number": unloaded_sequence_number,
-        "actual_unloaded_sequence_number": actual_unloaded_sequence_number,
-        "type": trip_type
+        "trip_id":
+            trip_id,
+
+        "pageno":
+            page,
+
+        "count":
+            count,
+
+        "unloaded_sequence_number":
+            unloaded_sequence_number,
+
+        "actual_unloaded_sequence_number":
+            actual_unloaded_sequence_number,
+
+        "type":
+            trip_type,
     }
 
-    r = requests.get(
+    response = spx_get(
         TRIP_API,
-        headers=HEADERS,
         params=params,
-        timeout=30
+        timeout=30,
     )
 
-    r.raise_for_status()
+    data = response.json()
 
-    return r.json()
+    if data.get(
+        "retcode"
+    ) not in (
+        None,
+        0,
+        "0",
+    ):
+        raise RuntimeError(
+            data.get(
+                "message",
+                "SPX trip error",
+            )
+        )
+
+    return data

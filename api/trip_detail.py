@@ -1,32 +1,40 @@
-import requests
-
-from config import BASE_URL, HEADERS
-
-DETAIL_API = BASE_URL + "/api/admin/transportation/trip/history/detail"
+from config import BASE_URL
+from core.spx_request import spx_get
 
 
-def get_trip_detail(trip_id):
-    """
-    Lấy toàn bộ thông tin của Trip
-    """
+DETAIL_API = (
+    BASE_URL
+    + "/api/admin/transportation/trip/history/detail"
+)
 
+
+def get_trip_detail(
+    trip_id
+):
     params = {
-        "trip_id": trip_id,
-        "new_process_switch": "false"
+        "trip_id":
+            trip_id,
+
+        "new_process_switch":
+            "false",
     }
 
-    r = requests.get(
+    response = spx_get(
         DETAIL_API,
-        headers=HEADERS,
         params=params,
-        timeout=30
+        timeout=30,
     )
 
-    r.raise_for_status()
+    data = response.json()
 
-    data = r.json()
-
-    if data["retcode"] != 0:
-        raise Exception(data["message"])
+    if data.get(
+        "retcode"
+    ) != 0:
+        raise RuntimeError(
+            data.get(
+                "message",
+                "Unknown trip detail error",
+            )
+        )
 
     return data

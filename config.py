@@ -1,17 +1,20 @@
 import os
 from dotenv import load_dotenv
+from core.auth import get_spx_headers
 
 load_dotenv()
 
-BASE_URL = os.getenv("BASE_URL")
-COOKIE = os.getenv("COOKIE")
-CSRF = os.getenv("CSRF")
+BASE_URL = os.getenv("BASE_URL", "https://spx.shopee.vn")
 
-HEADERS = {
-    "Cookie": COOKIE,
-    "X-Csrftoken": CSRF,
-    "Referer": "https://spx.shopee.vn/",
-    "Origin": "https://spx.shopee.vn",
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json"
-}
+def get_headers(
+    force_refresh=False,
+    silent=False,
+):
+    if cache_valid:
+        if not silent:
+            print(
+                f"SPX auth cache: OK "
+                f"({minutes_left} phút còn lại)"
+            )
+
+        return headers
