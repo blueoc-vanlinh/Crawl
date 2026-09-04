@@ -805,11 +805,9 @@ def clear_spx_auth_cache():
 def get_spx_headers(
     force_refresh=False
 ):
-    auth = (
-        get_spx_auth(
-            force_refresh=
-                force_refresh
-        )
+    auth = get_spx_auth(
+        force_refresh=
+            force_refresh
     )
 
     return {
@@ -819,6 +817,9 @@ def get_spx_headers(
         "X-Csrftoken":
             auth["csrf"],
 
+        "X-CSRFToken":
+            auth["csrf"],
+
         "Referer":
             "https://spx.shopee.vn/",
 
@@ -826,8 +827,18 @@ def get_spx_headers(
             "https://spx.shopee.vn",
 
         "User-Agent":
-            "Mozilla/5.0",
+            (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/140.0.0.0 "
+                "Safari/537.36"
+            ),
 
         "Accept":
-            "application/json",
+            "application/json, text/plain, */*",
+
+        "Accept-Language":
+            "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
     }

@@ -631,7 +631,228 @@ def filter_to_rows_for_sync(
         selected,
         stats,
     )
+def ensure_to_sheet_grid(
+    service,
+    required_rows,
+    required_columns,
+):
+    spreadsheet = (
+        service
+        .spreadsheets()
+        .get(
+            spreadsheetId=
+                SPREADSHEET_ID,
+            fields=(
+                "sheets("
+                "properties("
+                "sheetId,"
+                "title,"
+                "gridProperties("
+                "rowCount,"
+                "columnCount"
+                ")"
+                ")"
+                ")"
+            ),
+        )
+        .execute()
+    )
 
+    sheet_properties = None
+
+    for sheet in spreadsheet.get(
+        "sheets",
+        [],
+    ):
+        properties = (
+            sheet.get(
+                "properties",
+                {},
+            )
+        )
+
+        if (
+            int(
+                properties.get(
+                    "sheetId",
+                    -1,
+                )
+            )
+            == int(
+                TO_GID
+            )
+        ):
+            sheet_properties = (
+                properties
+            )
+            break
+
+    if not sheet_properties:
+        raise RuntimeError(
+            "Không tìm thấy "
+            f"TO_GID={TO_GID}"
+        )
+
+    grid_properties = (
+        sheet_properties.get(
+            "gridProperties",
+            {},
+        )
+    )
+
+    current_rows = int(
+        grid_properties.get(
+            "rowCount",
+            0,
+        )
+        or 0
+    )
+
+    current_columns = int(
+        grid_properties.get(
+            "columnCount",
+            0,
+        )
+        or 0
+    )
+
+    required_rows = max(
+        1,
+        int(
+            required_rows
+            or 1
+        ),
+    )
+
+    required_columns = max(
+        1,
+        int(
+            required_columns
+            or 1
+        ),
+    )
+
+    target_rows = max(
+        current_rows,
+        required_rows,
+    )
+
+    target_columns = max(
+        current_columns,
+        required_columns,
+    )
+
+    if (
+        target_rows
+        == current_rows
+        and
+        target_columns
+        == current_columns
+    ):
+        return {
+            "expanded":
+                False,
+
+            "old_rows":
+                current_rows,
+
+            "new_rows":
+                current_rows,
+
+            "old_columns":
+                current_columns,
+
+            "new_columns":
+                current_columns,
+        }
+
+    new_grid = {}
+
+    fields = []
+
+    if (
+        target_rows
+        > current_rows
+    ):
+        new_grid[
+            "rowCount"
+        ] = target_rows
+
+        fields.append(
+            "gridProperties.rowCount"
+        )
+
+    if (
+        target_columns
+        > current_columns
+    ):
+        new_grid[
+            "columnCount"
+        ] = target_columns
+
+        fields.append(
+            "gridProperties.columnCount"
+        )
+
+    body = {
+        "requests": [
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId":
+                            TO_GID,
+
+                        "gridProperties":
+                            new_grid,
+                    },
+
+                    "fields":
+                        ",".join(
+                            fields
+                        ),
+                }
+            }
+        ]
+    }
+
+    (
+        service
+        .spreadsheets()
+        .batchUpdate(
+            spreadsheetId=
+                SPREADSHEET_ID,
+            body=
+                body,
+        )
+        .execute()
+    )
+
+    print(
+        "[TO SHEET] Grid expanded: "
+        f"rows "
+        f"{current_rows}"
+        f"->{target_rows}, "
+        f"columns "
+        f"{current_columns}"
+        f"->{target_columns}"
+    )
+
+    return {
+        "expanded":
+            True,
+
+        "old_rows":
+            current_rows,
+
+        "new_rows":
+            target_rows,
+
+        "old_columns":
+            current_columns,
+
+        "new_columns":
+            target_columns,
+    }
 
 def upsert_to_rows(
     service,
@@ -679,12 +900,20 @@ def upsert_to_rows(
         )
     )
 
+    existing = (
+        read_existing_data(
+            service,
+            sheet_name,
+        )
+    )
+
     direct_key_map = {}
+
     identity_map = {}
 
     for (
         row_number,
-        values
+        values,
     ) in enumerate(
         existing[1:],
         start=2,
@@ -733,9 +962,11 @@ def upsert_to_rows(
     )
 
     updates = []
+
     inserts = []
 
     skipped_count = 0
+
     unchanged_count = 0
 
     last_row = (
@@ -827,12 +1058,14 @@ def upsert_to_rows(
         )
 
         merged_values = []
+
         data_changed = False
+
         sync_index = None
 
         for (
             index,
-            header
+            header,
         ) in enumerate(
             headers
         ):
@@ -850,8 +1083,13 @@ def upsert_to_rows(
                 )
             )
 
-            if header == "sync_time":
-                sync_index = index
+            if (
+                header
+                == "sync_time"
+            ):
+                sync_index = (
+                    index
+                )
 
                 merged_values.append(
                     old_value
@@ -877,7 +1115,9 @@ def upsert_to_rows(
             ) != str(
                 old_value
             ):
-                data_changed = True
+                data_changed = (
+                    True
+                )
 
             merged_values.append(
                 final_value
@@ -887,7 +1127,10 @@ def upsert_to_rows(
             unchanged_count += 1
             continue
 
-        if sync_index is not None:
+        if (
+            sync_index
+            is not None
+        ):
             incoming_sync = (
                 row.get(
                     "sync_time",
@@ -901,13 +1144,16 @@ def upsert_to_rows(
             ):
                 merged_values[
                     sync_index
-                ] = incoming_sync
+                ] = (
+                    incoming_sync
+                )
 
         updates.append({
             "range": (
                 f"'{sheet_name}'!"
                 f"A{row_number}:"
-                f"{end_col}{row_number}"
+                f"{end_col}"
+                f"{row_number}"
             ),
 
             "values": [
@@ -916,6 +1162,35 @@ def upsert_to_rows(
         })
 
     if updates:
+        max_update_row = max(
+            int(
+                str(
+                    update[
+                        "range"
+                    ]
+                )
+                .rsplit(
+                    end_col,
+                    1,
+                )[-1]
+            )
+            for update
+            in updates
+        )
+
+        ensure_to_sheet_grid(
+            service=
+                service,
+
+            required_rows=
+                max_update_row,
+
+            required_columns=
+                len(
+                    headers
+                ),
+        )
+
         (
             service
             .spreadsheets()
@@ -923,6 +1198,7 @@ def upsert_to_rows(
             .batchUpdate(
                 spreadsheetId=
                     SPREADSHEET_ID,
+
                 body={
                     "valueInputOption":
                         "RAW",
@@ -948,6 +1224,19 @@ def upsert_to_rows(
             - 1
         )
 
+        ensure_to_sheet_grid(
+            service=
+                service,
+
+            required_rows=
+                end_row,
+
+            required_columns=
+                len(
+                    headers
+                ),
+        )
+
         (
             service
             .spreadsheets()
@@ -955,13 +1244,17 @@ def upsert_to_rows(
             .update(
                 spreadsheetId=
                     SPREADSHEET_ID,
+
                 range=(
                     f"'{sheet_name}'!"
                     f"A{start_row}:"
-                    f"{end_col}{end_row}"
+                    f"{end_col}"
+                    f"{end_row}"
                 ),
+
                 valueInputOption=
                     "RAW",
+
                 body={
                     "values":
                         inserts
@@ -987,7 +1280,6 @@ def upsert_to_rows(
         "skipped":
             skipped_count,
     }
-
 
 def push_to_rows(
     rows,

@@ -1,21 +1,17 @@
-from api.daily_trip_sync import (
+from api.order.daily_trip_sync import (
     sync_two_day_trips,
 )
 
 
 def main():
-    result = (
-        sync_two_day_trips(
-            target_date=None,
-            trip_wait_seconds=0,
-            max_workers=5,
-        )
+    result = sync_two_day_trips(
+        target_date=None,
+        trip_wait_seconds=0,
+        max_workers=5,
     )
 
     print()
-    print(
-        "=" * 80
-    )
+    print("=" * 80)
 
     print(
         "TOTAL:",
@@ -106,14 +102,6 @@ def main():
     )
 
     print(
-        "ORDER CRAWL:",
-        result.get(
-            "order_crawl",
-            False,
-        ),
-    )
-
-    print(
         "WORKERS:",
         result.get(
             "max_workers",
@@ -130,9 +118,62 @@ def main():
         "seconds",
     )
 
-    print(
-        "=" * 80
+    failed = result.get(
+        "failed",
+        [],
     )
+
+    print()
+    print("=" * 80)
+    print("FAILED DETAIL")
+    print("=" * 80)
+
+    if not failed:
+        print("Không có trip lỗi")
+
+    for index, item in enumerate(
+        failed,
+        start=1,
+    ):
+        print()
+        print(
+            f"[{index}]"
+        )
+
+        print(
+            "TRIP ID:",
+            item.get(
+                "trip_id",
+                "",
+            ),
+        )
+
+        print(
+            "TRIP NUMBER:",
+            item.get(
+                "trip_number",
+                "",
+            ),
+        )
+
+        print(
+            "SOURCE:",
+            item.get(
+                "source",
+                "",
+            ),
+        )
+
+        print(
+            "ERROR:",
+            item.get(
+                "error",
+                "",
+            ),
+        )
+
+    print()
+    print("=" * 80)
 
 
 if __name__ == "__main__":

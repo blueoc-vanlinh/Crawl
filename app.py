@@ -1,7 +1,10 @@
 import os
 import time
+import threading
 import traceback
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone, timedelta
 from core.spx_request import spx_get
 from flask import (
     Flask,
@@ -14,22 +17,24 @@ from config import (
     BASE_URL,
     get_headers,
 )
+from api.routes.vehicle_status import vehicle_status_bp
 
-from api.order_check import (
+from api.order.daily_trip_sync import sync_two_day_trips
+from api.order.order_check import (
     check_order,
     check_orders,
     get_tracking_info,
 )
-from api.data_order_deli import (
+from api.order.data_order_deli import (
     build_order_row,
     analyze_order,
 )
-from api.cage_packed_history import (
+from api.order.cage_packed_history import (
     read_sheet_rows,
     sync_cage_history,
     crawl_all_packed_history,
 )
-from api.scanto import (
+from api.to.scanto import (
     scan_to_orders,
 )
 
@@ -75,6 +80,315 @@ from api.sheet.common import (
 
 app = Flask(__name__)
 
+app.register_blueprint(vehicle_status_bp)
+
+VN_TZ = timezone(
+    timedelta(hours=7)
+)
+
+TRIP_STATION_GID = 1157738563
+VOLUME_GID = 81652235
+VOLUME_SPREADSHEET_ID = "1YfRPJd99ipWnUqPqXCFDlQzHj8ADxdP_UE1363KqLS8"
+VOLUME_SYNC_WORKERS = 5
+_volume_sync_lock = threading.Lock()
+_volume_sync_state_lock = threading.Lock()
+_volume_sync_state = {
+    "running": False,
+    "date": None,
+    "started_at": None,
+    "finished_at": None,
+    "result": None,
+    "error": None,
+}
+
+TRIP_CRAWL_TIMES = {
+    (9, 0),    # 09:00 sáng
+    (21, 0),   # 21:00 tối
+}
+
+TRIP_CRAWL_WORKERS = 5
+
+_trip_scheduler_started = False
+
+_trip_scheduler_lock = threading.Lock()
+
+_trip_running_lock = threading.Lock()
+
+
+def run_daily_trip_crawl():
+    """
+    Crawl trip:
+        - hôm qua + hôm nay
+        - HISTORY / ENDED
+        - HANDOVER query_type=2
+        - 5 workers
+        - order detail vẫn disabled theo sync_two_day_trips
+    """
+
+    if not _trip_running_lock.acquire(
+        blocking=False
+    ):
+        print(
+            "[TRIP SCHEDULER] "
+            "Một lần crawl đang chạy, bỏ qua lần này."
+        )
+        return
+
+    try:
+        print()
+        print("=" * 90)
+        print("SCHEDULED DAILY TRIP CRAWL")
+        print(
+            "TIME:",
+            datetime.now(
+                VN_TZ
+            ).strftime(
+                "%d/%m/%Y %H:%M:%S"
+            ),
+        )
+        print(
+            "RANGE: HÔM QUA + HÔM NAY"
+        )
+        print(
+            "TRIP SOURCES: HISTORY / ENDED + HANDOVER"
+        )
+        print(
+            "HANDOVER: query_type=2"
+        )
+        print(
+            "WORKERS:",
+            TRIP_CRAWL_WORKERS,
+        )
+        print("=" * 90)
+
+        try:
+            result = sync_two_day_trips(
+                target_date=None,
+                trip_wait_seconds=0,
+                max_workers=TRIP_CRAWL_WORKERS,
+            )
+
+            print()
+            print("=" * 90)
+            print("SCHEDULED TRIP CRAWL COMPLETE")
+            print("=" * 90)
+
+            print(
+                "TOTAL:",
+                result.get(
+                    "total_trips",
+                    0,
+                ),
+            )
+
+            print(
+                "SUCCESS:",
+                result.get(
+                    "success_count",
+                    0,
+                ),
+            )
+
+            print(
+                "FAILED:",
+                result.get(
+                    "failed_count",
+                    0,
+                ),
+            )
+
+            print(
+                "LOADING:",
+                result.get(
+                    "loading_count",
+                    0,
+                ),
+            )
+
+            print(
+                "TO BY TRIP:",
+                result.get(
+                    "to_count",
+                    0,
+                ),
+            )
+
+            print(
+                "TO UNIQUE GLOBAL:",
+                result.get(
+                    "scan_to_cache_size",
+                    0,
+                ),
+            )
+
+            print(
+                "TO API CALLS:",
+                result.get(
+                    "scan_to_api_calls",
+                    0,
+                ),
+            )
+
+            print(
+                "TO CACHE HITS:",
+                result.get(
+                    "scan_to_cache_hits",
+                    0,
+                ),
+            )
+
+            print(
+                "BULKY:",
+                result.get(
+                    "bulky_count",
+                    0,
+                ),
+            )
+
+            print(
+                "SCAN TO ROWS:",
+                result.get(
+                    "scan_to_rows",
+                    0,
+                ),
+            )
+
+            print(
+                "ORDER CANDIDATES:",
+                result.get(
+                    "order_candidates",
+                    0,
+                ),
+            )
+
+            print(
+                "ORDER CRAWL:",
+                result.get(
+                    "order_crawl",
+                    False,
+                ),
+            )
+
+            print(
+                "WORKERS:",
+                result.get(
+                    "max_workers",
+                    0,
+                ),
+            )
+
+            print(
+                "ELAPSED:",
+                result.get(
+                    "elapsed_seconds",
+                    0,
+                ),
+                "seconds",
+            )
+
+            print("=" * 90)
+
+        except Exception as exc:
+            print()
+            print("=" * 90)
+            print(
+                "SCHEDULED TRIP CRAWL ERROR"
+            )
+            print(
+                type(exc).__name__,
+                ":",
+                exc,
+            )
+            print("=" * 90)
+
+    finally:
+        _trip_running_lock.release()
+
+
+def daily_trip_scheduler():
+    """
+    Scheduler chạy liên tục trong background.
+
+    09:00  -> crawl
+    21:00  -> crawl
+
+    Mỗi mốc thời gian chỉ chạy 1 lần.
+    """
+
+    last_run_key = None
+
+    print()
+    print("=" * 90)
+    print("DAILY TRIP SCHEDULER STARTED")
+    print("SCHEDULE: 09:00 + 21:00")
+    print("RANGE: HÔM QUA + HÔM NAY")
+    print("SOURCES: HISTORY / ENDED + HANDOVER")
+    print("WORKERS: 5")
+    print("=" * 90)
+
+    while True:
+        try:
+            now = datetime.now(
+                VN_TZ
+            )
+
+            current_key = (
+                now.strftime(
+                    "%Y-%m-%d"
+                ),
+                now.hour,
+                now.minute,
+            )
+
+            if (
+                (
+                    now.hour,
+                    now.minute,
+                )
+                in TRIP_CRAWL_TIMES
+                and current_key
+                != last_run_key
+            ):
+                last_run_key = current_key
+
+                thread = threading.Thread(
+                    target=run_daily_trip_crawl,
+                    name="daily-trip-crawl",
+                    daemon=True,
+                )
+
+                thread.start()
+
+            time.sleep(20)
+
+        except Exception as exc:
+            print(
+                "[TRIP SCHEDULER ERROR]",
+                type(exc).__name__,
+                ":",
+                exc,
+            )
+
+            time.sleep(30)
+
+
+def start_daily_trip_scheduler():
+    global _trip_scheduler_started
+
+    with _trip_scheduler_lock:
+
+        if _trip_scheduler_started:
+            return
+
+        _trip_scheduler_started = True
+
+        thread = threading.Thread(
+            target=daily_trip_scheduler,
+            name="daily-trip-scheduler",
+            daemon=True,
+        )
+
+        thread.start()
 
 def check_auth():
     return get_headers()
@@ -204,7 +518,7 @@ def get_trip_loading_data(
 
         else:
             params[
-                "unloaded_sequence_number"
+                "actual_unloaded_sequence_number"
             ] = (
                 sequence
             )
@@ -3308,6 +3622,1887 @@ def sync_to_orders(
                 str(e),
         }), 500
 
+
+def _volume_safe_int(
+    value,
+    default=0,
+):
+    try:
+        if value in (
+            None,
+            "",
+        ):
+            return default
+
+        return int(
+            float(value)
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
+def _volume_parse_ts(
+    value,
+):
+    if value in (
+        None,
+        "",
+        0,
+        "0",
+    ):
+        return None
+
+    try:
+        number = float(
+            value
+        )
+
+        while (
+            number
+            > 10_000_000_000
+        ):
+            number /= 1000
+
+        return datetime.fromtimestamp(
+            number,
+            VN_TZ,
+        )
+
+    except (
+        TypeError,
+        ValueError,
+        OSError,
+        OverflowError,
+    ):
+        pass
+
+    text_value = str(
+        value
+    ).strip()
+
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%d/%m/%Y %H:%M:%S",
+    ):
+        try:
+            parsed = datetime.strptime(
+                text_value,
+                fmt,
+            )
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(
+                    tzinfo=VN_TZ
+                )
+
+            return parsed.astimezone(
+                VN_TZ
+            )
+
+        except ValueError:
+            continue
+
+    return None
+
+
+def _volume_get_station_id(
+    row,
+):
+    return str(
+        row.get(
+            "station_id",
+            "",
+        )
+        or row.get(
+            "station",
+            "",
+        )
+        or row.get(
+            "trip_station_id",
+            "",
+        )
+        or ""
+    ).strip()
+
+
+def _volume_get_sequence(
+    row,
+):
+    return _volume_safe_int(
+        row.get(
+            "sequence",
+        )
+        or row.get(
+            "sequence_number",
+        )
+        or row.get(
+            "station_sequence",
+        )
+    )
+
+
+def _volume_get_trip_id(
+    row,
+):
+    return str(
+        row.get(
+            "trip_id",
+            "",
+        )
+        or row.get(
+            "id",
+            "",
+        )
+        or ""
+    ).strip()
+
+
+def _volume_get_ata(
+    row,
+):
+    return _volume_parse_ts(
+        row.get(
+            "ata",
+        )
+        or row.get(
+            "actual_arrival_time",
+        )
+    )
+
+
+def _volume_get_unseal(
+    row,
+):
+    return _volume_parse_ts(
+        row.get(
+            "unseal_time",
+        )
+        or row.get(
+            "unsealed_time",
+        )
+    )
+
+
+def _volume_get_unloaded(
+    row,
+):
+    return _volume_parse_ts(
+        row.get(
+            "unloaded_time",
+        )
+        or row.get(
+            "actual_unloaded_time",
+        )
+    )
+
+
+def _volume_format_sheet_time(
+    value,
+):
+    parsed = _volume_parse_ts(
+        value
+    )
+
+    if parsed is None:
+        return ""
+
+    return parsed.strftime(
+        "%d/%m/%Y %H:%M:%S"
+    )
+
+
+def _volume_get_business_range(
+    target_date=None,
+):
+    if target_date is None:
+        current_date = (
+            datetime.now(
+                VN_TZ
+            ).date()
+        )
+
+    else:
+        current_date = (
+            datetime.strptime(
+                str(
+                    target_date
+                ).strip(),
+                "%Y-%m-%d",
+            ).date()
+        )
+
+    start_datetime = datetime(
+        current_date.year,
+        current_date.month,
+        current_date.day,
+        6,
+        0,
+        0,
+        tzinfo=VN_TZ,
+    )
+
+    end_datetime = (
+        start_datetime
+        + timedelta(
+            days=1
+        )
+    )
+
+    return (
+        current_date,
+        start_datetime,
+        end_datetime,
+    )
+
+
+def _get_volume_trip_contexts(
+    target_date=None,
+):
+    (
+        current_date,
+        start_datetime,
+        end_datetime,
+    ) = _volume_get_business_range(
+        target_date
+    )
+
+    service = (
+        get_sheets_service()
+    )
+
+    rows = _sheet_rows_as_dicts(
+        service=
+            service,
+        gid=
+            TRIP_STATION_GID,
+    )
+
+    selected = {}
+    skipped_station = 0
+    skipped_sequence = 0
+    skipped_ata = 0
+    skipped_range = 0
+
+    for row in rows:
+        if not isinstance(
+            row,
+            dict,
+        ):
+            continue
+
+        station_id = (
+            _volume_get_station_id(
+                row
+            )
+        )
+
+        if station_id != "3909":
+            skipped_station += 1
+            continue
+
+        sequence = (
+            _volume_get_sequence(
+                row
+            )
+        )
+
+        if sequence <= 1:
+            skipped_sequence += 1
+            continue
+
+        ata = _volume_get_ata(
+            row
+        )
+
+        if ata is None:
+            skipped_ata += 1
+            continue
+
+        if not (
+            start_datetime
+            <= ata
+            < end_datetime
+        ):
+            skipped_range += 1
+            continue
+
+        trip_id = (
+            _volume_get_trip_id(
+                row
+            )
+        )
+
+        if not trip_id:
+            continue
+
+        current = (
+            selected.get(
+                trip_id
+            )
+        )
+
+        unseal = _volume_get_unseal(
+            row
+        )
+
+        unloaded = _volume_get_unloaded(
+            row
+        )
+
+        candidate = {
+            "trip_id":
+                trip_id,
+            "trip_number":
+                str(
+                    row.get("trip_number")
+                    or row.get("trip_no")
+                    or row.get("trip_name")
+                    or row.get("LH Trip Number")
+                    or ""
+                ).strip().upper(),
+            "vehicle_number":
+                str(
+                    row.get("vehicle_number")
+                    or row.get("vehicle_plate_number")
+                    or row.get("vehicle_no")
+                    or row.get("Vehicle Plate Number")
+                    or ""
+                ).strip().upper(),
+            "sequence":
+                sequence,
+            "ata":
+                ata.isoformat(),
+            "unseal_time":
+                (
+                    unseal.isoformat()
+                    if unseal
+                    else ""
+                ),
+            "unloaded_time":
+                (
+                    unloaded.isoformat()
+                    if unloaded
+                    else ""
+                ),
+        }
+
+        if current is None:
+            selected[
+                trip_id
+            ] = candidate
+            continue
+
+        current_ata = (
+            _volume_parse_ts(
+                current.get(
+                    "ata"
+                )
+            )
+        )
+
+        if (
+            current_ata is None
+            or ata > current_ata
+        ):
+            selected[
+                trip_id
+            ] = candidate
+
+    trips = list(
+        selected.values()
+    )
+
+    trips.sort(
+        key=lambda item:
+            item.get(
+                "ata",
+                "",
+            )
+    )
+
+    return {
+        "date":
+            current_date.isoformat(),
+        "from":
+            start_datetime.isoformat(),
+        "to":
+            end_datetime.isoformat(),
+        "source_rows":
+            len(rows),
+        "trips":
+            trips,
+        "trip_count":
+            len(trips),
+        "skipped": {
+            "other_station":
+                skipped_station,
+            "not_inbound":
+                skipped_sequence,
+            "no_ata":
+                skipped_ata,
+            "outside_range":
+                skipped_range,
+        },
+    }
+
+
+def _crawl_loading_for_volume_trip(
+    trip_context,
+):
+    trip_id = (
+        trip_context[
+            "trip_id"
+        ]
+    )
+
+    sequence = int(
+        trip_context[
+            "sequence"
+        ]
+    )
+
+    loading_data = (
+        get_trip_loading_data(
+            trip_id=
+                trip_id,
+            direction=
+                "inbound",
+            sequence=
+                sequence,
+        )
+    )
+
+    items = extract_list(
+        loading_data
+    )
+
+    to_rows = build_to_rows(
+        trip_id=
+            trip_id,
+        items=
+            items,
+        direction=
+            "inbound",
+        sequence=
+            sequence,
+    )
+
+    to_numbers = []
+    bulky_ids = []
+    seen_to = set()
+    seen_bulky = set()
+
+    for item in items:
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        scan_number = str(
+            item.get(
+                "scan_number"
+            )
+            or item.get(
+                "to_number"
+            )
+            or item.get(
+                "shipment_id"
+            )
+            or item.get(
+                "fleet_order_id"
+            )
+            or ""
+        ).strip().upper()
+
+        if not scan_number:
+            continue
+
+        if scan_number.startswith(
+            "TO"
+        ):
+            if (
+                scan_number
+                not in seen_to
+            ):
+                seen_to.add(
+                    scan_number
+                )
+
+                to_numbers.append(
+                    scan_number
+                )
+
+            continue
+
+        if scan_number.startswith(
+            "SPXVN"
+        ):
+            if (
+                scan_number
+                not in seen_bulky
+            ):
+                seen_bulky.add(
+                    scan_number
+                )
+
+                bulky_ids.append(
+                    scan_number
+                )
+
+    return {
+        "trip_id":
+            trip_id,
+        "trip_number":
+            trip_context.get(
+                "trip_number",
+                "",
+            ),
+        "vehicle_number":
+            trip_context.get(
+                "vehicle_number",
+                "",
+            ),
+        "ata":
+            trip_context.get(
+                "ata",
+                "",
+            ),
+        "unseal_time":
+            trip_context.get(
+                "unseal_time",
+                "",
+            ),
+        "unloaded_time":
+            trip_context.get(
+                "unloaded_time",
+                "",
+            ),
+        "sequence":
+            sequence,
+        "loading_items":
+            len(items),
+        "to_rows":
+            to_rows,
+        "to_numbers":
+            to_numbers,
+        "bulky_ids":
+            bulky_ids,
+    }
+
+
+def _scan_one_volume_to(
+    to_number,
+    trip_id,
+):
+    scan_result = scan_to_orders(
+        to_number=
+            to_number,
+        count=
+            10000,
+    )
+
+    scan_data = (
+        scan_result.get(
+            "data",
+            {},
+        )
+        if isinstance(
+            scan_result,
+            dict,
+        )
+        else {}
+    )
+
+    items = (
+        scan_data.get(
+            "list",
+            [],
+        )
+        if isinstance(
+            scan_data,
+            dict,
+        )
+        else []
+    )
+
+    shipment_ids = []
+    seen = set()
+
+    for item in items:
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        shipment_id = str(
+            item.get(
+                "shipment_id",
+            )
+            or item.get(
+                "fleet_order_id",
+            )
+            or ""
+        ).strip().upper()
+
+        if not shipment_id:
+            continue
+
+        if shipment_id in seen:
+            continue
+
+        seen.add(
+            shipment_id
+        )
+
+        shipment_ids.append(
+            shipment_id
+        )
+
+    return {
+        "to_number":
+            to_number,
+        "trip_id":
+            trip_id,
+        "shipment_ids":
+            shipment_ids,
+    }
+
+
+def _push_volume_rows(
+    rows,
+):
+    if not rows:
+        return {
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+        }
+
+    service = (
+        get_sheets_service()
+    )
+
+    sheet_name = (
+        get_sheet_name_by_gid(
+            gid=
+                VOLUME_GID,
+            service=
+                service,
+        )
+    )
+
+    existing = (
+        read_existing_data(
+            service,
+            sheet_name,
+        )
+    )
+
+    required_headers = [
+        "_key",
+        "Operational Date",
+        "trip_id",
+        "LH Trip Number",
+        "Vehicle Plate Number",
+        "Station Name",
+        "Actual Arrival Time",
+        "Unsealed time",
+        "Unloaded time",
+        "Inbound(order)",
+        "Bulky",
+        "TO Count",
+        "sync_time",
+    ]
+
+    if existing:
+        headers = [
+            str(
+                item
+            ).strip()
+            for item in existing[0]
+        ]
+    else:
+        headers = []
+
+    changed = False
+
+    for header in required_headers:
+        if header not in headers:
+            headers.append(
+                header
+            )
+            changed = True
+
+    if not headers:
+        headers = list(
+            required_headers
+        )
+        changed = True
+
+    def column_letter(
+        number,
+    ):
+        result = ""
+
+        while number:
+            number, remainder = divmod(
+                number - 1,
+                26,
+            )
+
+            result = (
+                chr(
+                    65 + remainder
+                )
+                + result
+            )
+
+        return result
+
+    end_col = column_letter(
+        len(headers)
+    )
+
+    if (
+        changed
+        or not existing
+    ):
+        (
+            service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=
+                    VOLUME_SPREADSHEET_ID,
+                range=(
+                    f"'{sheet_name}'!"
+                    f"A1:{end_col}1"
+                ),
+                valueInputOption=
+                    "RAW",
+                body={
+                    "values": [
+                        headers
+                    ]
+                },
+            )
+            .execute()
+        )
+
+    key_index = headers.index(
+        "_key"
+    )
+
+    existing_map = {}
+
+    for row_number, values in enumerate(
+        existing[1:]
+        if existing
+        else [],
+        start=2,
+    ):
+        key = (
+            str(
+                values[
+                    key_index
+                ]
+            ).strip()
+            if key_index < len(
+                values
+            )
+            else ""
+        )
+
+        if key:
+            existing_map[
+                key
+            ] = (
+                row_number,
+                values,
+            )
+
+    updates = []
+    inserts = []
+    unchanged = 0
+
+    for row in rows:
+        key = str(
+            row.get(
+                "_key",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if not key:
+            continue
+
+        new_values = [
+            row.get(
+                header,
+                "",
+            )
+            for header in headers
+        ]
+
+        current = existing_map.get(
+            key
+        )
+
+        if current is None:
+            inserts.append(
+                new_values
+            )
+            continue
+
+        row_number, old_values = current
+
+        normalized_old = list(
+            old_values
+        )
+
+        if len(
+            normalized_old
+        ) < len(headers):
+            normalized_old.extend(
+                [""]
+                * (
+                    len(headers)
+                    - len(
+                        normalized_old
+                    )
+                )
+            )
+
+        comparable_new = [
+            ""
+            if value is None
+            else str(
+                value
+            )
+            for value in new_values
+        ]
+
+        comparable_old = [
+            ""
+            if value is None
+            else str(
+                value
+            )
+            for value in normalized_old[
+                :len(headers)
+            ]
+        ]
+
+        if (
+            comparable_new
+            == comparable_old
+        ):
+            unchanged += 1
+            continue
+
+        updates.append({
+            "range": (
+                f"'{sheet_name}'!"
+                f"A{row_number}:"
+                f"{end_col}{row_number}"
+            ),
+            "values": [
+                new_values
+            ],
+        })
+
+    if updates:
+        (
+            service.spreadsheets()
+            .values()
+            .batchUpdate(
+                spreadsheetId=
+                    VOLUME_SPREADSHEET_ID,
+                body={
+                    "valueInputOption":
+                        "RAW",
+                    "data":
+                        updates,
+                },
+            )
+            .execute()
+        )
+
+    inserted = 0
+
+    if inserts:
+        start_row = max(
+            2,
+            len(
+                existing
+            ) + 1,
+        )
+
+        end_row = (
+            start_row
+            + len(
+                inserts
+            )
+            - 1
+        )
+
+        (
+            service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=
+                    VOLUME_SPREADSHEET_ID,
+                range=(
+                    f"'{sheet_name}'!"
+                    f"A{start_row}:"
+                    f"{end_col}{end_row}"
+                ),
+                valueInputOption=
+                    "RAW",
+                body={
+                    "values":
+                        inserts,
+                },
+            )
+            .execute()
+        )
+
+        inserted = len(
+            inserts
+        )
+
+    return {
+        "sheet":
+            sheet_name,
+        "gid":
+            VOLUME_GID,
+        "inserted":
+            inserted,
+        "updated":
+            len(
+                updates
+            ),
+        "unchanged":
+            unchanged,
+        "rows":
+            len(
+                rows
+            ),
+    }
+
+
+def run_volume_sync(
+    target_date=None,
+    max_workers=5,
+):
+    if not _volume_sync_lock.acquire(
+        blocking=False
+    ):
+        raise RuntimeError(
+            "Volume sync đang chạy"
+        )
+
+    started_at = time.time()
+
+    try:
+        try:
+            max_workers = int(
+                max_workers
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            max_workers = 5
+
+        max_workers = max(
+            1,
+            min(
+                max_workers,
+                5,
+            ),
+        )
+
+        context = (
+            _get_volume_trip_contexts(
+                target_date
+            )
+        )
+
+        trips = context[
+            "trips"
+        ]
+
+        print()
+        print("=" * 90)
+        print(
+            "VOLUME SYNC"
+        )
+        print(
+            "DATE:",
+            context[
+                "date"
+            ],
+        )
+        print(
+            "FROM:",
+            context[
+                "from"
+            ],
+        )
+        print(
+            "TO:",
+            context[
+                "to"
+            ],
+        )
+        print(
+            "INBOUND TRIPS:",
+            len(trips),
+        )
+        print(
+            "WORKERS:",
+            max_workers,
+        )
+        print("=" * 90)
+
+        loading_results = []
+        loading_failed = []
+
+        if trips:
+            with ThreadPoolExecutor(
+                max_workers=
+                    max_workers
+            ) as executor:
+                future_map = {
+                    executor.submit(
+                        _crawl_loading_for_volume_trip,
+                        trip,
+                    ): trip
+
+                    for trip in trips
+                }
+
+                total_trips = len(
+                    future_map
+                )
+
+                done_count = 0
+
+                for future in as_completed(
+                    future_map
+                ):
+                    trip = future_map[
+                        future
+                    ]
+
+                    done_count += 1
+
+                    try:
+                        result = (
+                            future.result()
+                        )
+
+                        loading_results.append(
+                            result
+                        )
+
+                        print(
+                            f"[LOADING "
+                            f"{done_count}/"
+                            f"{total_trips}] "
+                            f"TRIP="
+                            f"{result['trip_id']} "
+                            f"ITEMS="
+                            f"{result['loading_items']} "
+                            f"TO="
+                            f"{len(result['to_numbers'])}"
+                        )
+
+                    except Exception as e:
+                        loading_failed.append({
+                            "trip_id":
+                                trip.get(
+                                    "trip_id"
+                                ),
+                            "trip_number":
+                                trip.get(
+                                    "trip_number"
+                                ),
+                            "error":
+                                str(e),
+                        })
+
+                        print(
+                            f"[LOADING "
+                            f"{done_count}/"
+                            f"{total_trips}] "
+                            f"ERROR "
+                            f"{trip.get('trip_id')} "
+                            f"=> {e}"
+                        )
+
+        global_to_map = {}
+        bulky_seen = set()
+        loading_item_total = 0
+        trip_volume_map = {}
+
+        for result in loading_results:
+            loading_item_total += int(
+                result.get(
+                    "loading_items",
+                    0,
+                )
+                or 0
+            )
+
+            trip_id = str(
+                result.get(
+                    "trip_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            trip_state = trip_volume_map.setdefault(
+                trip_id,
+                {
+                    "trip_id": trip_id,
+                    "trip_number": result.get(
+                        "trip_number",
+                        "",
+                    ),
+                    "vehicle_number": result.get(
+                        "vehicle_number",
+                        "",
+                    ),
+                    "ata": result.get(
+                        "ata",
+                        "",
+                    ),
+                    "unseal_time": result.get(
+                        "unseal_time",
+                        "",
+                    ),
+                    "unloaded_time": result.get(
+                        "unloaded_time",
+                        "",
+                    ),
+                    "to_numbers": set(),
+                    "bulky_ids": set(),
+                    "shipment_ids": set(),
+                },
+            )
+
+            for to_number in (
+                result.get(
+                    "to_numbers",
+                    [],
+                )
+            ):
+                trip_state[
+                    "to_numbers"
+                ].add(
+                    to_number
+                )
+
+                if (
+                    to_number
+                    not in global_to_map
+                ):
+                    global_to_map[
+                        to_number
+                    ] = trip_id
+
+            for bulky_id in (
+                result.get(
+                    "bulky_ids",
+                    [],
+                )
+            ):
+                trip_state[
+                    "bulky_ids"
+                ].add(
+                    bulky_id
+                )
+
+                bulky_seen.add(
+                    bulky_id
+                )
+
+        to_sheet_result = {
+            "skipped": True,
+            "reason":
+                "BULK_VOLUME_SYNC_DOES_NOT_PUSH_TO",
+        }
+
+        to_numbers = sorted(
+            global_to_map
+        )
+
+        print()
+        print(
+            "LOADING ITEMS:",
+            loading_item_total,
+        )
+        print(
+            "TO UNIQUE GLOBAL:",
+            len(to_numbers),
+        )
+        print(
+            "BULKY UNIQUE:",
+            len(bulky_seen),
+        )
+
+        scan_results = []
+        scan_failed = []
+
+        if to_numbers:
+            with ThreadPoolExecutor(
+                max_workers=
+                    max_workers
+            ) as executor:
+                future_map = {
+                    executor.submit(
+                        _scan_one_volume_to,
+                        to_number,
+                        global_to_map[
+                            to_number
+                        ],
+                    ): to_number
+
+                    for to_number
+                    in to_numbers
+                }
+
+                total_to = len(
+                    future_map
+                )
+
+                done_count = 0
+
+                for future in as_completed(
+                    future_map
+                ):
+                    to_number = (
+                        future_map[
+                            future
+                        ]
+                    )
+
+                    done_count += 1
+
+                    try:
+                        result = (
+                            future.result()
+                        )
+
+                        scan_results.append(
+                            result
+                        )
+
+                        print(
+                            f"[SCAN TO "
+                            f"{done_count}/"
+                            f"{total_to}] "
+                            f"{to_number} "
+                            f"=> "
+                            f"{len(result['shipment_ids'])} "
+                            f"orders"
+                        )
+
+                    except Exception as e:
+                        scan_failed.append({
+                            "to_number":
+                                to_number,
+                            "trip_id":
+                                global_to_map.get(
+                                    to_number,
+                                    "",
+                                ),
+                            "error":
+                                str(e),
+                        })
+
+                        print(
+                            f"[SCAN TO "
+                            f"{done_count}/"
+                            f"{total_to}] "
+                            f"{to_number} "
+                            f"ERROR => {e}"
+                        )
+
+        shipment_seen = set()
+
+        for scan_item in scan_results:
+            trip_id = str(
+                scan_item.get(
+                    "trip_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            trip_state = trip_volume_map.get(
+                trip_id
+            )
+
+            for shipment_id in (
+                scan_item.get(
+                    "shipment_ids",
+                    [],
+                )
+            ):
+                shipment_id = str(
+                    shipment_id
+                    or ""
+                ).strip().upper()
+
+                if not shipment_id:
+                    continue
+
+                shipment_seen.add(
+                    shipment_id
+                )
+
+                if trip_state is not None:
+                    trip_state[
+                        "shipment_ids"
+                    ].add(
+                        shipment_id
+                    )
+
+        volume_rows = []
+        sync_time = datetime.now(
+            VN_TZ
+        ).strftime(
+            "%d/%m/%Y %H:%M:%S"
+        )
+
+        for trip_id, trip_state in sorted(
+            trip_volume_map.items(),
+            key=lambda item: (
+                item[1].get(
+                    "ata",
+                    "",
+                ),
+                item[0],
+            ),
+        ):
+            shipment_ids = set(
+                trip_state.get(
+                    "shipment_ids",
+                    set(),
+                )
+            )
+
+            bulky_ids = set(
+                trip_state.get(
+                    "bulky_ids",
+                    set(),
+                )
+            )
+
+            all_orders = (
+                shipment_ids
+                | bulky_ids
+            )
+
+            volume_rows.append({
+                "_key": (
+                    f"{context['date']}|"
+                    f"{trip_id}"
+                ),
+                "Operational Date":
+                    context[
+                        "date"
+                    ],
+                "trip_id":
+                    trip_id,
+                "LH Trip Number":
+                    trip_state.get(
+                        "trip_number",
+                        "",
+                    ),
+                "Vehicle Plate Number":
+                    trip_state.get(
+                        "vehicle_number",
+                        "",
+                    ),
+                "Station Name":
+                    "Hung Yen SOC",
+                "Actual Arrival Time":
+                    _volume_format_sheet_time(
+                        trip_state.get(
+                            "ata"
+                        )
+                    ),
+                "Unsealed time":
+                    _volume_format_sheet_time(
+                        trip_state.get(
+                            "unseal_time"
+                        )
+                    ),
+                "Unloaded time":
+                    _volume_format_sheet_time(
+                        trip_state.get(
+                            "unloaded_time"
+                        )
+                    ),
+                "Inbound(order)":
+                    len(
+                        all_orders
+                    ),
+                "Bulky":
+                    len(
+                        bulky_ids
+                    ),
+                "TO Count":
+                    len(
+                        trip_state.get(
+                            "to_numbers",
+                            set(),
+                        )
+                    ),
+                "sync_time":
+                    sync_time,
+            })
+
+        volume_sheet_result = (
+            _push_volume_rows(
+                volume_rows
+            )
+        )
+
+        to_order_sheet_result = {
+            "skipped": True,
+            "reason":
+                "BULK_VOLUME_SYNC_DOES_NOT_PUSH_TO_ORDER",
+        }
+
+        elapsed = round(
+            time.time()
+            - started_at,
+            2,
+        )
+
+        result = {
+            "success":
+                (
+                    len(
+                        loading_failed
+                    )
+                    == 0
+                    and len(
+                        scan_failed
+                    )
+                    == 0
+                ),
+            "date":
+                context[
+                    "date"
+                ],
+            "from":
+                context[
+                    "from"
+                ],
+            "to":
+                context[
+                    "to"
+                ],
+            "source_rows":
+                context[
+                    "source_rows"
+                ],
+            "inbound_trips":
+                len(trips),
+            "loading_success":
+                len(
+                    loading_results
+                ),
+            "loading_failed":
+                len(
+                    loading_failed
+                ),
+            "loading_items":
+                loading_item_total,
+            "to_unique":
+                len(
+                    to_numbers
+                ),
+            "bulky_unique":
+                len(
+                    bulky_seen
+                ),
+            "to_scan_success":
+                len(
+                    scan_results
+                ),
+            "to_scan_failed":
+                len(
+                    scan_failed
+                ),
+            "to_order_rows":
+                0,
+            "volume_rows":
+                len(
+                    volume_rows
+                ),
+            "shipment_unique":
+                len(
+                    shipment_seen
+                ),
+            "sheet": {
+                "to":
+                    to_sheet_result,
+                "to_order":
+                    to_order_sheet_result,
+                "volume":
+                    volume_sheet_result,
+            },
+            "failed": {
+                "loading":
+                    loading_failed,
+                "scan_to":
+                    scan_failed,
+            },
+            "skipped":
+                context[
+                    "skipped"
+                ],
+            "elapsed_seconds":
+                elapsed,
+        }
+
+        print()
+        print("=" * 90)
+        print(
+            "VOLUME SYNC COMPLETE"
+        )
+        print(
+            "INBOUND TRIPS:",
+            result[
+                "inbound_trips"
+            ],
+        )
+        print(
+            "LOADING ITEMS:",
+            result[
+                "loading_items"
+            ],
+        )
+        print(
+            "TO UNIQUE:",
+            result[
+                "to_unique"
+            ],
+        )
+        print(
+            "TO SCAN SUCCESS:",
+            result[
+                "to_scan_success"
+            ],
+        )
+        print(
+            "TO SCAN FAILED:",
+            result[
+                "to_scan_failed"
+            ],
+        )
+        print(
+            "VOLUME ROWS:",
+            result[
+                "volume_rows"
+            ],
+        )
+        print(
+            "VOLUME SHEET:",
+            result[
+                "sheet"
+            ][
+                "volume"
+            ],
+        )
+        print(
+            "SHIPMENT UNIQUE:",
+            result[
+                "shipment_unique"
+            ],
+        )
+        print(
+            "ELAPSED:",
+            elapsed,
+            "seconds",
+        )
+        print("=" * 90)
+
+        return result
+
+    finally:
+        _volume_sync_lock.release()
+
+
+def _run_volume_sync_background(
+    target_date,
+    max_workers,
+):
+    with _volume_sync_state_lock:
+        _volume_sync_state[
+            "running"
+        ] = True
+        _volume_sync_state[
+            "date"
+        ] = target_date
+        _volume_sync_state[
+            "started_at"
+        ] = datetime.now(
+            VN_TZ
+        ).isoformat()
+        _volume_sync_state[
+            "finished_at"
+        ] = None
+        _volume_sync_state[
+            "result"
+        ] = None
+        _volume_sync_state[
+            "error"
+        ] = None
+
+    try:
+        result = run_volume_sync(
+            target_date=
+                target_date,
+            max_workers=
+                max_workers,
+        )
+
+        with _volume_sync_state_lock:
+            _volume_sync_state[
+                "result"
+            ] = result
+
+    except Exception as e:
+        with _volume_sync_state_lock:
+            _volume_sync_state[
+                "error"
+            ] = str(e)
+
+        print(
+            traceback.format_exc()
+        )
+
+    finally:
+        with _volume_sync_state_lock:
+            _volume_sync_state[
+                "running"
+            ] = False
+            _volume_sync_state[
+                "finished_at"
+            ] = datetime.now(
+                VN_TZ
+            ).isoformat()
+
+
+@app.route(
+    "/api/volume-sync",
+    methods=["POST"],
+)
+def api_volume_sync():
+    try:
+        body = (
+            request.get_json(
+                silent=True
+            )
+            or {}
+        )
+
+        target_date = (
+            request.args.get(
+                "date",
+                default=None,
+                type=str,
+            )
+            or body.get(
+                "date"
+            )
+        )
+
+        if target_date:
+            datetime.strptime(
+                str(
+                    target_date
+                ).strip(),
+                "%Y-%m-%d",
+            )
+
+            target_date = str(
+                target_date
+            ).strip()
+
+        max_workers = (
+            request.args.get(
+                "max_workers",
+                default=None,
+                type=int,
+            )
+            or body.get(
+                "max_workers"
+            )
+            or VOLUME_SYNC_WORKERS
+        )
+
+        max_workers = max(
+            1,
+            min(
+                int(
+                    max_workers
+                ),
+                5,
+            ),
+        )
+
+        with _volume_sync_state_lock:
+            if _volume_sync_state.get(
+                "running"
+            ):
+                return jsonify({
+                    "success":
+                        False,
+                    "running":
+                        True,
+                    "message":
+                        "Volume sync đang chạy",
+                    "state":
+                        dict(
+                            _volume_sync_state
+                        ),
+                }), 409
+
+        thread = threading.Thread(
+            target=
+                _run_volume_sync_background,
+            args=(
+                target_date,
+                max_workers,
+            ),
+            name=
+                "volume-sync",
+            daemon=
+                True,
+        )
+
+        thread.start()
+
+        return jsonify({
+            "success":
+                True,
+            "running":
+                True,
+            "date":
+                target_date,
+            "max_workers":
+                max_workers,
+            "message":
+                "Volume sync đã được khởi chạy background",
+            "status_api":
+                "/api/volume-sync/status",
+        })
+
+    except ValueError:
+        return jsonify({
+            "success":
+                False,
+            "error":
+                "date phải có định dạng YYYY-MM-DD",
+        }), 400
+
+    except Exception as e:
+        print(
+            traceback.format_exc()
+        )
+
+        return jsonify({
+            "success":
+                False,
+            "error":
+                str(e),
+        }), 500
+
+
+@app.route(
+    "/api/volume-sync/status",
+    methods=["GET"],
+)
+def api_volume_sync_status():
+    with _volume_sync_state_lock:
+        state = dict(
+            _volume_sync_state
+        )
+
+    return jsonify({
+        "success":
+            state.get(
+                "error"
+            )
+            in (
+                None,
+                "",
+            ),
+        **state,
+    })
+
+
+@app.route(
+    "/api/volume-sync/trips",
+    methods=["GET"],
+)
+def api_volume_sync_trips():
+    try:
+        target_date = request.args.get(
+            "date",
+            default=None,
+            type=str,
+        )
+
+        result = (
+            _get_volume_trip_contexts(
+                target_date
+            )
+        )
+
+        return jsonify({
+            "success":
+                True,
+            **result,
+        })
+
+    except ValueError:
+        return jsonify({
+            "success":
+                False,
+            "error":
+                "date phải có định dạng YYYY-MM-DD",
+        }), 400
+
+    except Exception as e:
+        print(
+            traceback.format_exc()
+        )
+
+        return jsonify({
+            "success":
+                False,
+            "error":
+                str(e),
+        }), 500
+
 BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
 )
@@ -3377,13 +5572,36 @@ def frontend_routes(path):
         FRONTEND_DIST,
         "index.html"
     )
-if __name__ == "__main__":
-    startup_auth_check()
+@app.route(
+    "/api/trip/daily-crawl",
+    methods=["POST"]
+)
+def manual_daily_trip_crawl():
 
-    app.run( 
+    thread = threading.Thread(
+        target=run_daily_trip_crawl,
+        name="manual-daily-trip-crawl",
+        daemon=True,
+    )
+
+    thread.start()
+
+    return jsonify({
+        "success": True,
+        "message": (
+            "Daily trip crawl đã được "
+            "khởi chạy background."
+        ),
+    })    
+if __name__ == "__main__":
+
+    "startup_auth_check()"
+
+    "start_daily_trip_scheduler()"
+
+    app.run(
         host="0.0.0.0",
         port=5000,
         debug=False,
         use_reloader=False,
-        threaded=True,
     )

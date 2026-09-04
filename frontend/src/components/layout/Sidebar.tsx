@@ -19,6 +19,11 @@ const menu = [
     icon: LayoutDashboard,
   },
   {
+    path: "/inbound",
+    name: "Inbound Status",
+    icon: Activity,
+  },
+  {
     path: "/trip",
     name: "LH Trip",
     icon: Truck,

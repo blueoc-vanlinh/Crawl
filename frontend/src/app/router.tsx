@@ -22,6 +22,10 @@ import CagePackedHistoryPage
   from "../features/cage/CagePackedHistoryPage"
 
 import {
+  InboundStatus
+} from "../features/vehicle_status/InboundStatus"
+
+import {
   JobsPage,
 } from "../pages/JobsPage"
 
@@ -40,6 +44,11 @@ export const router =
           index: true,
           element:
             <DashboardPage />,
+        },
+        {
+          path: "inbound",
+          element:
+            <InboundStatus />,
         },
         {
           path: "Trip",
