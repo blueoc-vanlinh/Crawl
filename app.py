@@ -18,7 +18,9 @@ from config import (
     get_headers,
 )
 from api.routes.vehicle_status import vehicle_status_bp
-
+from api.trip.realtime_trip import (
+    sync_realtime_vehicle_trips,
+)
 from api.order.daily_trip_sync import sync_two_day_trips
 from api.order.order_check import (
     check_order,
@@ -100,12 +102,10 @@ _volume_sync_state = {
     "result": None,
     "error": None,
 }
-
-TRIP_CRAWL_TIMES = {
-    (9, 0),    # 09:00 sáng
-    (21, 0),   # 21:00 tối
+TRIP_CRAWL_MINUTES = {
+    0,
+    30,
 }
-
 TRIP_CRAWL_WORKERS = 5
 
 _trip_scheduler_started = False
@@ -115,16 +115,9 @@ _trip_scheduler_lock = threading.Lock()
 _trip_running_lock = threading.Lock()
 
 
-def run_daily_trip_crawl():
-    """
-    Crawl trip:
-        - hôm qua + hôm nay
-        - HISTORY / ENDED
-        - HANDOVER query_type=2
-        - 5 workers
-        - order detail vẫn disabled theo sync_two_day_trips
-    """
-
+def run_daily_trip_crawl(
+    target_date=None,
+):
     if not _trip_running_lock.acquire(
         blocking=False
     ):
@@ -135,9 +128,21 @@ def run_daily_trip_crawl():
         return
 
     try:
+        crawl_date = (
+            target_date
+            if target_date
+            else datetime.now(
+                VN_TZ
+            ).strftime(
+                "%Y-%m-%d"
+            )
+        )
+
         print()
         print("=" * 90)
-        print("SCHEDULED DAILY TRIP CRAWL")
+        print(
+            "DAILY TRIP + REALTIME + VOLUME CRAWL"
+        )
         print(
             "TIME:",
             datetime.now(
@@ -147,13 +152,8 @@ def run_daily_trip_crawl():
             ),
         )
         print(
-            "RANGE: HÔM QUA + HÔM NAY"
-        )
-        print(
-            "TRIP SOURCES: HISTORY / ENDED + HANDOVER"
-        )
-        print(
-            "HANDOVER: query_type=2"
+            "DATE:",
+            crawl_date,
         )
         print(
             "WORKERS:",
@@ -162,210 +162,353 @@ def run_daily_trip_crawl():
         print("=" * 90)
 
         try:
-            result = sync_two_day_trips(
-                target_date=None,
-                trip_wait_seconds=0,
-                max_workers=TRIP_CRAWL_WORKERS,
+            # =========================================================
+            # 1. DAILY TRIP
+            # =========================================================
+
+            print()
+            print("=" * 90)
+            print(
+                "STEP 1/3 - DAILY TRIP SYNC"
+            )
+            print("=" * 90)
+
+            trip_result = (
+                sync_two_day_trips(
+                    target_date=
+                        crawl_date,
+
+                    trip_wait_seconds=
+                        0,
+
+                    max_workers=
+                        TRIP_CRAWL_WORKERS,
+                )
             )
 
             print()
             print("=" * 90)
-            print("SCHEDULED TRIP CRAWL COMPLETE")
-            print("=" * 90)
-
+            print(
+                "DAILY TRIP SYNC COMPLETE"
+            )
             print(
                 "TOTAL:",
-                result.get(
+                trip_result.get(
                     "total_trips",
                     0,
                 ),
             )
-
             print(
                 "SUCCESS:",
-                result.get(
+                trip_result.get(
                     "success_count",
                     0,
                 ),
             )
-
             print(
                 "FAILED:",
-                result.get(
+                trip_result.get(
                     "failed_count",
                     0,
                 ),
             )
+            print("=" * 90)
+
+            # =========================================================
+            # 2. REALTIME
+            # ARRIVED 50
+            # UNSEAL 60
+            # UNLOADED 80
+            # =========================================================
+
+            print()
+            print("=" * 90)
+            print(
+                "STEP 2/3 - REALTIME VEHICLE SYNC"
+            )
+            print(
+                "STATUSES: 50 / 60 / 80"
+            )
+            print(
+                "DATE:",
+                crawl_date,
+            )
+            print("=" * 90)
+
+            realtime_result = (
+                sync_realtime_vehicle_trips(
+                    target_date=
+                        crawl_date,
+
+                    max_workers=
+                        TRIP_CRAWL_WORKERS,
+                )
+            )
+
+            print()
+            print("=" * 90)
+            print(
+                "REALTIME VEHICLE SYNC COMPLETE"
+            )
+            print(
+                "TRIPS:",
+                realtime_result.get(
+                    "trip_count",
+                    0,
+                ),
+            )
+            print(
+                "TRIP ROWS:",
+                realtime_result.get(
+                    "trip_rows",
+                    0,
+                ),
+            )
+            print(
+                "TRIP STATION ROWS:",
+                realtime_result.get(
+                    "trip_station_rows",
+                    0,
+                ),
+            )
+            print(
+                "FAILED:",
+                len(
+                    realtime_result.get(
+                        "failed",
+                        [],
+                    )
+                    or []
+                ),
+            )
+            print("=" * 90)
+
+            # =========================================================
+            # 3. VOLUME
+            # loading -> TO -> scanTO -> Bulky -> Volume
+            # =========================================================
+
+            print()
+            print("=" * 90)
+            print(
+                "STEP 3/3 - VOLUME SYNC"
+            )
+            print(
+                "DATE:",
+                crawl_date,
+            )
+            print("=" * 90)
+
+            volume_result = (
+                run_volume_sync(
+                    target_date=
+                        crawl_date,
+
+                    max_workers=
+                        VOLUME_SYNC_WORKERS,
+                )
+            )
+
+            print()
+            print("=" * 90)
+            print(
+                "VOLUME SYNC COMPLETE"
+            )
 
             print(
-                "LOADING:",
-                result.get(
-                    "loading_count",
+                "INBOUND TRIPS:",
+                volume_result.get(
+                    "inbound_trips",
                     0,
                 ),
             )
 
             print(
-                "TO BY TRIP:",
-                result.get(
-                    "to_count",
+                "LOADING ITEMS:",
+                volume_result.get(
+                    "loading_items",
                     0,
                 ),
             )
 
             print(
-                "TO UNIQUE GLOBAL:",
-                result.get(
-                    "scan_to_cache_size",
-                    0,
-                ),
-            )
-
-            print(
-                "TO API CALLS:",
-                result.get(
-                    "scan_to_api_calls",
-                    0,
-                ),
-            )
-
-            print(
-                "TO CACHE HITS:",
-                result.get(
-                    "scan_to_cache_hits",
+                "TO UNIQUE:",
+                volume_result.get(
+                    "to_unique",
                     0,
                 ),
             )
 
             print(
                 "BULKY:",
-                result.get(
-                    "bulky_count",
+                volume_result.get(
+                    "bulky_unique",
                     0,
                 ),
             )
 
             print(
-                "SCAN TO ROWS:",
-                result.get(
-                    "scan_to_rows",
+                "TO SCAN SUCCESS:",
+                volume_result.get(
+                    "to_scan_success",
                     0,
                 ),
             )
 
             print(
-                "ORDER CANDIDATES:",
-                result.get(
-                    "order_candidates",
+                "TO SCAN FAILED:",
+                volume_result.get(
+                    "to_scan_failed",
                     0,
                 ),
             )
 
             print(
-                "ORDER CRAWL:",
-                result.get(
-                    "order_crawl",
-                    False,
-                ),
-            )
-
-            print(
-                "WORKERS:",
-                result.get(
-                    "max_workers",
+                "SHIPMENT UNIQUE:",
+                volume_result.get(
+                    "shipment_unique",
                     0,
                 ),
             )
 
             print(
-                "ELAPSED:",
-                result.get(
-                    "elapsed_seconds",
+                "VOLUME ROWS:",
+                volume_result.get(
+                    "volume_rows",
                     0,
                 ),
-                "seconds",
             )
 
             print("=" * 90)
+
+            print()
+            print("=" * 90)
+            print(
+                "FULL AUTO CRAWL COMPLETE"
+            )
+            print(
+                "DATE:",
+                crawl_date,
+            )
+            print(
+                "DAILY TRIPS:",
+                trip_result.get(
+                    "total_trips",
+                    0,
+                ),
+            )
+            print(
+                "REALTIME TRIPS:",
+                realtime_result.get(
+                    "trip_count",
+                    0,
+                ),
+            )
+            print(
+                "VOLUME TRIPS:",
+                volume_result.get(
+                    "inbound_trips",
+                    0,
+                ),
+            )
+            print("=" * 90)
+
+            return {
+                "success":
+                    True,
+
+                "date":
+                    crawl_date,
+
+                "trip":
+                    trip_result,
+
+                "realtime":
+                    realtime_result,
+
+                "volume":
+                    volume_result,
+            }
 
         except Exception as exc:
             print()
             print("=" * 90)
             print(
-                "SCHEDULED TRIP CRAWL ERROR"
+                "DAILY TRIP CRAWL ERROR"
             )
             print(
                 type(exc).__name__,
                 ":",
                 exc,
             )
+            print(
+                traceback.format_exc()
+            )
             print("=" * 90)
+
+            return {
+                "success":
+                    False,
+
+                "date":
+                    crawl_date,
+
+                "error":
+                    str(
+                        exc
+                    ),
+            }
 
     finally:
         _trip_running_lock.release()
 
-
 def daily_trip_scheduler():
-    """
-    Scheduler chạy liên tục trong background.
-
-    09:00  -> crawl
-    21:00  -> crawl
-
-    Mỗi mốc thời gian chỉ chạy 1 lần.
-    """
-
     last_run_key = None
-
-    print()
-    print("=" * 90)
-    print("DAILY TRIP SCHEDULER STARTED")
-    print("SCHEDULE: 09:00 + 21:00")
-    print("RANGE: HÔM QUA + HÔM NAY")
-    print("SOURCES: HISTORY / ENDED + HANDOVER")
-    print("WORKERS: 5")
-    print("=" * 90)
 
     while True:
         try:
-            now = datetime.now(
-                VN_TZ
-            )
+            now = datetime.now()
 
-            current_key = (
-                now.strftime(
-                    "%Y-%m-%d"
-                ),
+            run_key = (
+                now.strftime("%Y-%m-%d"),
                 now.hour,
                 now.minute,
             )
 
             if (
-                (
-                    now.hour,
-                    now.minute,
-                )
-                in TRIP_CRAWL_TIMES
-                and current_key
-                != last_run_key
+                now.minute in TRIP_CRAWL_MINUTES
+                and run_key != last_run_key
             ):
-                last_run_key = current_key
+                last_run_key = run_key
 
-                thread = threading.Thread(
-                    target=run_daily_trip_crawl,
-                    name="daily-trip-crawl",
-                    daemon=True,
+                print(
+                    "\n"
+                    + "=" * 90
+                )
+                print(
+                    "AUTO DAILY TRIP CRAWL"
+                )
+                print(
+                    "TIME:",
+                    now.strftime(
+                        "%d/%m/%Y %H:%M:%S"
+                    ),
+                )
+                print(
+                    "=" * 90
                 )
 
-                thread.start()
+                run_daily_trip_crawl(
+                    target_date=now.strftime(
+                        "%Y-%m-%d"
+                    )
+                )
 
-            time.sleep(20)
+            time.sleep(10)
 
         except Exception as exc:
             print(
-                "[TRIP SCHEDULER ERROR]",
-                type(exc).__name__,
-                ":",
+                "[DAILY TRIP SCHEDULER ERROR]",
                 exc,
             )
 
@@ -373,22 +516,31 @@ def daily_trip_scheduler():
 
 
 def start_daily_trip_scheduler():
-    global _trip_scheduler_started
+    thread = threading.Thread(
+        target=daily_trip_scheduler,
+        name="daily-trip-scheduler",
+        daemon=True,
+    )
 
-    with _trip_scheduler_lock:
+    thread.start()
 
-        if _trip_scheduler_started:
-            return
+    print(
+        "=" * 90
+    )
+    print(
+        "DAILY TRIP SCHEDULER STARTED"
+    )
+    print(
+        "SCHEDULE: EVERY 30 MINUTES"
+    )
+    print(
+        "RUN AT: HH:00 + HH:30"
+    )
+    print(
+        "=" * 90
+    )
 
-        _trip_scheduler_started = True
-
-        thread = threading.Thread(
-            target=daily_trip_scheduler,
-            name="daily-trip-scheduler",
-            daemon=True,
-        )
-
-        thread.start()
+    return thread
 
 def check_auth():
     return get_headers()
@@ -754,7 +906,7 @@ def trip_detail(
     trip_id
 ):
     try:
-        check_auth()
+        #check_auth()
 
         trip_id = (
             str(trip_id)
@@ -867,7 +1019,7 @@ def trip_editing(
     trip_id
 ):
     try:
-        check_auth()
+        #check_auth()
 
         trip_id = (
             str(trip_id)
@@ -903,7 +1055,7 @@ def trip_seal(
     trip_id
 ):
     try:
-        check_auth()
+        #check_auth()
 
         trip_id = (
             str(trip_id)
@@ -939,7 +1091,7 @@ def station_detail(
     station_id
 ):
     try:
-        check_auth()
+        #check_auth()
 
         station_id = (
             str(station_id)
@@ -980,7 +1132,7 @@ def trip_sync_all(
     trip_id,
 ):
     try:
-        check_auth()
+        #check_auth()
 
         trip_input = str(
             trip_id or ""
@@ -1675,7 +1827,7 @@ def trip_sync_orders(
     trip_id,
 ):
     try:
-        check_auth()
+        #check_auth()
 
         body = (
             request.get_json(
@@ -2317,7 +2469,7 @@ def order_tracking(
     shipment_id
 ):
     try:
-        check_auth()
+        #check_auth()
 
         shipment_id = (
             shipment_id
@@ -2352,7 +2504,7 @@ def order_check(
     shipment_id
 ):
     try:
-        check_auth()
+        #check_auth()
 
         shipment_id = (
             shipment_id
@@ -2408,7 +2560,7 @@ def sync_order(
     shipment_id
 ):
     try:
-        check_auth()
+        #check_auth()
 
         shipment_id = (
             shipment_id
@@ -2499,7 +2651,7 @@ def sync_order(
 )
 def sync_orders_from_sheet():
     try:
-        check_auth()
+        #check_auth()
 
         shipment_ids = (
             get_push_order_ids()
@@ -2976,7 +3128,7 @@ def resolve_trip_identifier(
 )
 def cage_packed_history_all():
     try:
-        check_auth()
+        #check_auth()
 
         body = (
             request.get_json(
@@ -3090,7 +3242,7 @@ def cage_packed_history_all():
 )
 def cage_history_sync():
     try:
-        check_auth()
+        #check_auth()
 
         body = (
             request.get_json(
@@ -3207,7 +3359,7 @@ def to_orders(
     to_number
 ):
     try:
-        check_auth()
+        #check_auth()
 
         count = request.args.get(
             "count",
@@ -3265,7 +3417,7 @@ def sync_to_orders(
     to_number
 ):
     try:
-        check_auth()
+        #check_auth()
 
         body = (
             request.get_json(
@@ -4274,6 +4426,135 @@ def _scan_one_volume_to(
             shipment_ids,
     }
 
+def ensure_volume_grid(
+    service,
+    required_rows,
+    required_columns,
+):
+    spreadsheet = (
+        service
+        .spreadsheets()
+        .get(
+            spreadsheetId=
+                VOLUME_SPREADSHEET_ID,
+
+            fields=(
+                "sheets.properties("
+                "sheetId,"
+                "gridProperties"
+                ")"
+            ),
+        )
+        .execute()
+    )
+
+    target = None
+
+    for sheet in spreadsheet.get(
+        "sheets",
+        [],
+    ):
+        props = sheet.get(
+            "properties",
+            {},
+        )
+
+        if int(
+            props.get(
+                "sheetId",
+                -1,
+            )
+        ) == int(
+            VOLUME_GID
+        ):
+            target = props
+            break
+
+    if target is None:
+        raise RuntimeError(
+            f"Không tìm thấy Volume gid={VOLUME_GID}"
+        )
+
+    grid = target.get(
+        "gridProperties",
+        {},
+    )
+
+    current_rows = int(
+        grid.get(
+            "rowCount",
+            0,
+        )
+        or 0
+    )
+
+    current_columns = int(
+        grid.get(
+            "columnCount",
+            0,
+        )
+        or 0
+    )
+
+    new_rows = max(
+        current_rows,
+        int(required_rows),
+    )
+
+    new_columns = max(
+        current_columns,
+        int(required_columns),
+    )
+
+    if (
+        new_rows == current_rows
+        and
+        new_columns == current_columns
+    ):
+        return
+
+    (
+        service
+        .spreadsheets()
+        .batchUpdate(
+            spreadsheetId=
+                VOLUME_SPREADSHEET_ID,
+
+            body={
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId":
+                                    int(
+                                        VOLUME_GID
+                                    ),
+
+                                "gridProperties": {
+                                    "rowCount":
+                                        new_rows,
+
+                                    "columnCount":
+                                        new_columns,
+                                },
+                            },
+
+                            "fields":
+                                "gridProperties.rowCount,"
+                                "gridProperties.columnCount",
+                        }
+                    }
+                ]
+            },
+        )
+        .execute()
+    )
+
+    print(
+        "[VOLUME SHEET] Grid expanded: "
+        f"rows {current_rows}->{new_rows}, "
+        f"columns {current_columns}->{new_columns}"
+    )
 
 def _push_volume_rows(
     rows,
@@ -4551,6 +4832,17 @@ def _push_volume_rows(
                 inserts
             )
             - 1
+        )
+
+        ensure_volume_grid(
+            service=
+                service,
+            required_rows=
+                end_row,
+            required_columns=
+                len(
+                    headers
+                ),
         )
 
         (
@@ -5577,27 +5869,57 @@ def frontend_routes(path):
     methods=["POST"]
 )
 def manual_daily_trip_crawl():
+    body = (
+        request.get_json(
+            silent=True
+        )
+        or {}
+    )
+
+    target_date = (
+        request.args.get(
+            "date",
+            default=None,
+            type=str,
+        )
+        or body.get(
+            "date"
+        )
+    )
 
     thread = threading.Thread(
-        target=run_daily_trip_crawl,
-        name="manual-daily-trip-crawl",
-        daemon=True,
+        target=
+            run_daily_trip_crawl,
+
+        args=(
+            target_date,
+        ),
+
+        name=
+            "manual-daily-trip-crawl",
+
+        daemon=
+            True,
     )
 
     thread.start()
 
     return jsonify({
-        "success": True,
-        "message": (
-            "Daily trip crawl đã được "
-            "khởi chạy background."
-        ),
+        "success":
+            True,
+
+        "date":
+            target_date,
+
+        "message":
+            "Daily Trip + Volume crawl "
+            "đã được khởi chạy background.",
     })    
 if __name__ == "__main__":
 
-    "startup_auth_check()"
+    startup_auth_check()
 
-    "start_daily_trip_scheduler()"
+    start_daily_trip_scheduler()
 
     app.run(
         host="0.0.0.0",

@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 
 from datetime import (
@@ -21,6 +22,7 @@ VN_TZ = timezone(
 
 TRIP_STATION_GID = 1157738563
 VOLUME_GID = 81652235
+
 HUNG_YEN_SOC_ID = 3909
 HUNG_YEN_SOC_NAME = "Hung Yen SOC"
 
@@ -165,6 +167,58 @@ def parse_datetime_value(
     return None
 
 
+def normalize_date_value(
+    value,
+) -> date | None:
+    if value in (
+        None,
+        "",
+    ):
+        return None
+
+    if isinstance(
+        value,
+        datetime,
+    ):
+        return value.date()
+
+    if isinstance(
+        value,
+        date,
+    ):
+        return value
+
+    text = normalize_text(
+        value
+    )
+
+    if not text:
+        return None
+
+    for fmt in (
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%Y/%m/%d",
+    ):
+        try:
+            return datetime.strptime(
+                text,
+                fmt,
+            ).date()
+
+        except ValueError:
+            continue
+
+    parsed = parse_datetime_value(
+        text
+    )
+
+    if parsed is not None:
+        return parsed.date()
+
+    return None
+
+
 def get_business_window(
     target_date:
         str
@@ -211,7 +265,9 @@ def get_business_window(
         target_date,
         date,
     ):
-        business_date = target_date
+        business_date = (
+            target_date
+        )
 
     else:
         raise ValueError(
@@ -346,6 +402,7 @@ def read_trip_station_rows(
         values
     )
 
+
 def read_volume_rows(
 ) -> list[dict]:
     service = (
@@ -371,61 +428,117 @@ def read_volume_rows(
     )
 
 
-def normalize_date_value(
-    value,
-) -> date | None:
-    if value in (
-        None,
-        "",
-    ):
-        return None
-
-    if isinstance(
-        value,
-        datetime,
-    ):
-        return value.date()
-
-    if isinstance(
-        value,
-        date,
-    ):
-        return value
-
-    text = normalize_text(
-        value
+def get_volume_key(
+    row: dict,
+) -> str:
+    trip_id = normalize_text(
+        row.get(
+            "trip_id"
+        )
     )
 
-    if not text:
-        return None
+    if trip_id:
+        return trip_id
 
-    for fmt in (
-        "%Y-%m-%d",
-        "%d/%m/%Y",
-        "%Y/%m/%d",
-    ):
-        try:
-            return datetime.strptime(
-                text,
-                fmt,
-            ).date()
-
-        except ValueError:
-            continue
-
-    parsed = parse_datetime_value(
-        text
+    trip_number = normalize_text(
+        row.get(
+            "LH Trip Number"
+        )
+        or row.get(
+            "trip_number"
+        )
     )
 
-    if parsed is not None:
-        return parsed.date()
+    if trip_number:
+        return trip_number
 
-    return None
+    return normalize_text(
+        row.get(
+            "_key"
+        )
+    )
 
 
-def get_volume_summary(
+def get_volume_value(
+    row: dict,
+) -> int:
+    return safe_int(
+        row.get(
+            "Inbound(order)"
+        )
+        or row.get(
+            "Inbound Order"
+        )
+        or row.get(
+            "inbound_order"
+        )
+    )
+
+
+def get_volume_bulky(
+    row: dict,
+) -> int:
+    return safe_int(
+        row.get(
+            "Bulky"
+        )
+        or row.get(
+            "bulky"
+        )
+    )
+
+
+def get_volume_to_count(
+    row: dict,
+) -> int:
+    return safe_int(
+        row.get(
+            "TO Count"
+        )
+        or row.get(
+            "to_count"
+        )
+    )
+
+
+def get_volume_unseal_time(
+    row: dict,
+) -> datetime | None:
+    return parse_datetime_value(
+        row.get(
+            "Unsealed time"
+        )
+        or row.get(
+            "Unsealed Time"
+        )
+        or row.get(
+            "unseal_time"
+        )
+        or row.get(
+            "unsealed_time"
+        )
+    )
+
+
+def get_volume_arrive_time(
+    row: dict,
+) -> datetime | None:
+    return parse_datetime_value(
+        row.get(
+            "Actual Arrival Time"
+        )
+        or row.get(
+            "actual_arrival_time"
+        )
+        or row.get(
+            "ata"
+        )
+    )
+
+
+def get_volume_rows_for_date(
     business_date: date,
-) -> dict:
+) -> dict[str, dict]:
     rows = read_volume_rows()
 
     matched = {}
@@ -452,16 +565,8 @@ def get_volume_summary(
         if row_date != business_date:
             continue
 
-        key = normalize_text(
-            row.get(
-                "_key"
-            )
-            or row.get(
-                "trip_id"
-            )
-            or row.get(
-                "LH Trip Number"
-            )
+        key = get_volume_key(
+            row
         )
 
         if not key:
@@ -471,38 +576,38 @@ def get_volume_summary(
             key
         ] = row
 
+    return matched
+
+
+def get_volume_summary(
+    business_date: date,
+) -> dict:
+    matched = (
+        get_volume_rows_for_date(
+            business_date
+        )
+    )
+
     inbound_order = 0
     bulky = 0
     to_count = 0
 
     for row in matched.values():
-        inbound_order += safe_int(
-            row.get(
-                "Inbound(order)"
-            )
-            or row.get(
-                "Inbound Order"
-            )
-            or row.get(
-                "inbound_order"
+        inbound_order += (
+            get_volume_value(
+                row
             )
         )
 
-        bulky += safe_int(
-            row.get(
-                "Bulky"
-            )
-            or row.get(
-                "bulky"
+        bulky += (
+            get_volume_bulky(
+                row
             )
         )
 
-        to_count += safe_int(
-            row.get(
-                "TO Count"
-            )
-            or row.get(
-                "to_count"
+        to_count += (
+            get_volume_to_count(
+                row
             )
         )
 
@@ -521,57 +626,19 @@ def get_volume_summary(
         "to_count":
             to_count,
     }
-    
+
+
 def get_volume_hourly(
     business_date: date,
     start: datetime,
     end: datetime,
     cutoff: datetime,
 ) -> list[dict]:
-    rows = read_volume_rows()
-
-    matched = {}
-
-    for row in rows:
-        if not isinstance(
-            row,
-            dict,
-        ):
-            continue
-
-        row_date = normalize_date_value(
-            row.get(
-                "Operational Date"
-            )
-            or row.get(
-                "operational_date"
-            )
-            or row.get(
-                "date"
-            )
+    matched = (
+        get_volume_rows_for_date(
+            business_date
         )
-
-        if row_date != business_date:
-            continue
-
-        key = normalize_text(
-            row.get(
-                "_key"
-            )
-            or row.get(
-                "trip_id"
-            )
-            or row.get(
-                "LH Trip Number"
-            )
-        )
-
-        if not key:
-            continue
-
-        matched[
-            key
-        ] = row
+    )
 
     hourly = []
 
@@ -618,36 +685,32 @@ def get_volume_hourly(
         })
 
     for row in matched.values():
-        arrive_time = parse_datetime_value(
-            row.get(
-                "Actual Arrival Time"
-            )
-            or row.get(
-                "actual_arrival_time"
-            )
-            or row.get(
-                "ata"
+        unseal_time = (
+            get_volume_unseal_time(
+                row
             )
         )
 
-        if arrive_time is None:
+        if unseal_time is None:
             continue
 
         if not (
             start
-            <= arrive_time
+            <= unseal_time
             < end
         ):
             continue
 
-        if arrive_time > cutoff:
+        if unseal_time > cutoff:
             continue
 
+        seconds = (
+            unseal_time
+            - start
+        ).total_seconds()
+
         index = int(
-            (
-                arrive_time
-                - start
-            ).total_seconds()
+            seconds
             // 3600
         )
 
@@ -662,15 +725,9 @@ def get_volume_hourly(
             index
         ][
             "volume"
-        ] += safe_int(
-            row.get(
-                "Inbound(order)"
-            )
-            or row.get(
-                "Inbound Order"
-            )
-            or row.get(
-                "inbound_order"
+        ] += (
+            get_volume_value(
+                row
             )
         )
 
@@ -678,12 +735,9 @@ def get_volume_hourly(
             index
         ][
             "bulky"
-        ] += safe_int(
-            row.get(
-                "Bulky"
-            )
-            or row.get(
-                "bulky"
+        ] += (
+            get_volume_bulky(
+                row
             )
         )
 
@@ -691,12 +745,9 @@ def get_volume_hourly(
             index
         ][
             "to_count"
-        ] += safe_int(
-            row.get(
-                "TO Count"
-            )
-            or row.get(
-                "to_count"
+        ] += (
+            get_volume_to_count(
+                row
             )
         )
 
@@ -706,7 +757,9 @@ def get_volume_hourly(
             "trip_count"
         ] += 1
 
-    return hourly    
+    return hourly
+
+
 def merge_volume_hourly(
     hourly: list[dict],
     volume_hourly: list[dict],
@@ -715,7 +768,8 @@ def merge_volume_hourly(
         item.get(
             "hour"
         ): item
-        for item in volume_hourly
+        for item
+        in volume_hourly
     }
 
     result = []
@@ -725,11 +779,13 @@ def merge_volume_hourly(
             item
         )
 
-        volume_item = volume_map.get(
-            row.get(
-                "hour"
-            ),
-            {},
+        volume_item = (
+            volume_map.get(
+                row.get(
+                    "hour"
+                ),
+                {},
+            )
         )
 
         row[
@@ -769,6 +825,8 @@ def merge_volume_hourly(
         )
 
     return result
+
+
 def get_trip_key(
     row: dict,
 ) -> str:
@@ -841,8 +899,10 @@ def get_sequence_number(
 def is_hung_yen_row(
     row: dict,
 ) -> bool:
-    station_id = get_station_id(
-        row
+    station_id = (
+        get_station_id(
+            row
+        )
     )
 
     if (
@@ -872,14 +932,10 @@ def is_inbound_hung_yen_row(
     ):
         return False
 
-    sequence_number = (
+    return (
         get_sequence_number(
             row
         )
-    )
-
-    return (
-        sequence_number
         > 1
     )
 
@@ -956,9 +1012,11 @@ def get_station_key(
         get_trip_key(
             row
         ),
+
         get_sequence_number(
             row
         ),
+
         get_station_id(
             row
         ),
@@ -969,12 +1027,16 @@ def row_is_newer(
     new_row: dict,
     old_row: dict,
 ) -> bool:
-    new_sync = get_sync_time(
-        new_row
+    new_sync = (
+        get_sync_time(
+            new_row
+        )
     )
 
-    old_sync = get_sync_time(
-        old_row
+    old_sync = (
+        get_sync_time(
+            old_row
+        )
     )
 
     if (
@@ -999,21 +1061,18 @@ def row_is_newer(
     ):
         return False
 
-    new_sheet_row = safe_int(
-        new_row.get(
-            "_sheet_row"
-        )
-    )
-
-    old_sheet_row = safe_int(
-        old_row.get(
-            "_sheet_row"
-        )
-    )
-
     return (
-        new_sheet_row
-        >= old_sheet_row
+        safe_int(
+            new_row.get(
+                "_sheet_row"
+            )
+        )
+        >=
+        safe_int(
+            old_row.get(
+                "_sheet_row"
+            )
+        )
     )
 
 
@@ -1029,8 +1088,10 @@ def dedupe_station_rows(
         ):
             continue
 
-        trip_key = get_trip_key(
-            row
+        trip_key = (
+            get_trip_key(
+                row
+            )
         )
 
         if not trip_key:
@@ -1075,8 +1136,10 @@ def build_trip_states(
     inbound_seen = set()
 
     for row in rows:
-        trip_key = get_trip_key(
-            row
+        trip_key = (
+            get_trip_key(
+                row
+            )
         )
 
         if not trip_key:
@@ -1084,7 +1147,7 @@ def build_trip_states(
 
         trip_rows.setdefault(
             trip_key,
-            []
+            [],
         ).append(
             row
         )
@@ -1246,33 +1309,6 @@ def is_event_in_window(
     )
 
 
-def get_hour_index(
-    event_time: datetime | None,
-    start: datetime,
-) -> int | None:
-    if event_time is None:
-        return None
-
-    seconds = (
-        event_time
-        - start
-    ).total_seconds()
-
-    index = int(
-        seconds
-        // 3600
-    )
-
-    if (
-        0
-        <= index
-        < 24
-    ):
-        return index
-
-    return None
-
-
 def is_waiting_at(
     state: dict,
     snapshot_time: datetime,
@@ -1316,6 +1352,7 @@ def is_waiting_at(
         return False
 
     return True
+
 
 def get_current_status(
     state: dict,
@@ -1695,6 +1732,8 @@ def build_total(
         status = get_current_status(
             state,
             cutoff,
+            start=start,
+            end=end,
         )
 
         if status == "LOADED":
@@ -1760,8 +1799,10 @@ def get_vehicle_status(
         | None
         = None,
 ) -> dict:
-    window = get_business_window(
-        target_date
+    window = (
+        get_business_window(
+            target_date
+        )
     )
 
     start = window[
@@ -1794,49 +1835,60 @@ def get_vehicle_status(
         latest_rows
     )
 
-    hourly = build_hourly(
-        trip_states,
-        start,
-        end,
-        cutoff,
+    hourly = (
+        build_hourly(
+            trip_states,
+            start,
+            end,
+            cutoff,
+        )
     )
 
-    volume_hourly = get_volume_hourly(
-        business_date=
+    volume_hourly = (
+        get_volume_hourly(
+            business_date=
+                window[
+                    "date"
+                ],
+
+            start=
+                start,
+
+            end=
+                end,
+
+            cutoff=
+                cutoff,
+        )
+    )
+
+    hourly = (
+        merge_volume_hourly(
+            hourly=
+                hourly,
+
+            volume_hourly=
+                volume_hourly,
+        )
+    )
+
+    total = (
+        build_total(
+            trip_states,
+            start,
+            end,
+            cutoff,
+        )
+    )
+
+    volume = (
+        get_volume_summary(
             window[
                 "date"
-            ],
-
-        start=
-            start,
-
-        end=
-            end,
-
-        cutoff=
-            cutoff,
+            ]
+        )
     )
 
-    hourly = merge_volume_hourly(
-        hourly=
-            hourly,
-
-        volume_hourly=
-            volume_hourly,
-    )
-
-    total = build_total(
-        trip_states,
-        start,
-        end,
-        cutoff,
-    )
-
-    volume = get_volume_summary(
-        window[
-            "date"
-        ]
-    )
     return {
         "success":
             True,
@@ -1877,17 +1929,20 @@ def get_vehicle_status(
 
         "hourly":
             hourly,
+
         "volume":
             volume,
+
         "total":
             total,
-            
     }
 
 
 def main():
-    result = get_vehicle_status(
-        target_date=None
+    result = (
+        get_vehicle_status(
+            target_date=None
+        )
     )
 
     print()
@@ -1929,10 +1984,11 @@ def main():
         f"{'UNSEAL':>9}"
         f"{'UNLOADED':>11}"
         f"{'WAITING':>10}"
+        f"{'VOLUME':>12}"
     )
 
     print(
-        "-" * 64
+        "-" * 76
     )
 
     for item in result[
@@ -1945,10 +2001,11 @@ def main():
             f"{item['unseal']:>9}"
             f"{item['unloaded']:>11}"
             f"{item['waiting']:>10}"
+            f"{item['volume']:>12}"
         )
 
     print(
-        "-" * 64
+        "-" * 76
     )
 
     total = result[
@@ -1962,6 +2019,7 @@ def main():
         f"{total['unseal']:>9}"
         f"{total['unloaded']:>11}"
         f"{total['waiting']:>10}"
+        f"{result['volume']['inbound_order']:>12}"
     )
 
     print()

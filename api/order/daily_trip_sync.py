@@ -644,16 +644,30 @@ def get_one_day_range(
     )
 
     return {
-        "target_date": target_date,
-        "previous_date": target_date,
-        "start_datetime": start_datetime,
-        "end_datetime": end_datetime,
-        "start_ts": int(
-            start_datetime.timestamp()
-        ),
-        "end_ts": int(
-            end_datetime.timestamp()
-        ),
+        "target_date":
+            target_date,
+
+        "previous_date":
+            target_date,
+
+        "start_date":
+            target_date,
+
+        "start_datetime":
+            start_datetime,
+
+        "end_datetime":
+            end_datetime,
+
+        "start_ts":
+            int(
+                start_datetime.timestamp()
+            ),
+
+        "end_ts":
+            int(
+                end_datetime.timestamp()
+            ),
     }
 
 
@@ -2694,7 +2708,7 @@ def sync_two_day_trips(
     trip_wait_seconds: float = 0.0,
     max_workers: int = 5,
     trip_limit: int | None = None,
-    scan_to: bool = False,
+    scan_to: bool = True,
 ) -> dict:
     started_at = time.time()
 
@@ -2718,7 +2732,7 @@ def sync_two_day_trips(
         if trip_limit <= 0:
             trip_limit = None
 
-    range_info = get_four_day_range(
+    range_info = get_one_day_range(
         target_date
     )
     start_datetime = range_info["start_datetime"]
@@ -2727,7 +2741,7 @@ def sync_two_day_trips(
 
     print()
     print("=" * 90)
-    print("DAILY TRIP SYNC - COMPLETED 4 DAYS DIRECT TO SHEET")
+    print("DAILY TRIP SYNC - COMPLETED 1 DAYS DIRECT TO SHEET")
     print(
         "MTIME FROM:",
         start_datetime.strftime("%d/%m/%Y %H:%M:%S"),
@@ -3294,7 +3308,7 @@ if __name__ == "__main__":
             trip_wait_seconds=0,
             max_workers=5,
             trip_limit=None,
-            scan_to=False,
+            scan_to=True,
         )
 
         print()

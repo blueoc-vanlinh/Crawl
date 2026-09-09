@@ -15,7 +15,140 @@ from api.sheet.common import (
 
 TRIP_GID = 0
 
+def ensure_trip_grid(
+    service,
+    required_rows,
+    required_columns,
+):
+    spreadsheet = (
+        service
+        .spreadsheets()
+        .get(
+            spreadsheetId=
+                SPREADSHEET_ID,
 
+            fields=(
+                "sheets.properties("
+                "sheetId,"
+                "title,"
+                "gridProperties"
+                ")"
+            ),
+        )
+        .execute()
+    )
+
+    target = None
+
+    for sheet in spreadsheet.get(
+        "sheets",
+        [],
+    ):
+        properties = sheet.get(
+            "properties",
+            {},
+        )
+
+        if int(
+            properties.get(
+                "sheetId",
+                -1,
+            )
+        ) == int(
+            TRIP_GID
+        ):
+            target = properties
+            break
+
+    if target is None:
+        raise RuntimeError(
+            f"Không tìm thấy Trip gid={TRIP_GID}"
+        )
+
+    grid = target.get(
+        "gridProperties",
+        {},
+    )
+
+    current_rows = int(
+        grid.get(
+            "rowCount",
+            0,
+        )
+        or 0
+    )
+
+    current_columns = int(
+        grid.get(
+            "columnCount",
+            0,
+        )
+        or 0
+    )
+
+    new_rows = max(
+        current_rows,
+        int(required_rows),
+    )
+
+    new_columns = max(
+        current_columns,
+        int(required_columns),
+    )
+
+    if (
+        new_rows == current_rows
+        and
+        new_columns == current_columns
+    ):
+        return
+
+    (
+        service
+        .spreadsheets()
+        .batchUpdate(
+            spreadsheetId=
+                SPREADSHEET_ID,
+
+            body={
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId":
+                                    int(
+                                        TRIP_GID
+                                    ),
+
+                                "gridProperties": {
+                                    "rowCount":
+                                        new_rows,
+
+                                    "columnCount":
+                                        new_columns,
+                                },
+                            },
+
+                            "fields": (
+                                "gridProperties."
+                                "rowCount,"
+                                "gridProperties."
+                                "columnCount"
+                            ),
+                        }
+                    }
+                ]
+            },
+        )
+        .execute()
+    )
+
+    print(
+        "[TRIP SHEET] Grid expanded: "
+        f"rows {current_rows}->{new_rows}, "
+        f"columns {current_columns}->{new_columns}"
+    )
+    
 def build_trip_row(
     trip_id,
     trip_detail,
@@ -387,6 +520,18 @@ def upsert_trip_rows(
                 inserts
             )
             - 1
+        )
+        ensure_trip_grid(
+            service=
+                service,
+
+            required_rows=
+                end_row,
+
+            required_columns=
+                len(
+                    headers
+                ),
         )
 
         (

@@ -5,7 +5,7 @@ import subprocess
 
 import requests
 import websocket
-
+from core.sheet_auth_push import push_spx_auth_to_sheet
 
 CHROME_EXE = (
     r"C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -730,20 +730,28 @@ def wait_for_spx_login(
 
 
 def create_new_spx_auth():
-    port = (
-        get_debug_port()
-    )
+    port = get_debug_port()
 
     try:
-        auth = (
-            wait_for_spx_login(
-                port
-            )
+        auth = wait_for_spx_login(
+            port
         )
 
         save_auth_cache(
             auth
         )
+
+        try:
+            push_spx_auth_to_sheet(
+                auth
+            )
+
+        except Exception as e:
+            print(
+                "Không đẩy được SPX auth "
+                "lên Google Sheet: "
+                f"{e}"
+            )
 
         print(
             "Đã lấy token SPX."
@@ -765,7 +773,6 @@ def create_new_spx_auth():
             port
         )
 
-
 def get_spx_auth(
     force_refresh=False
 ):
@@ -786,6 +793,7 @@ def clear_spx_auth_cache():
     if os.path.exists(
         AUTH_FILE
     ):
+        
         try:
             os.remove(
                 AUTH_FILE

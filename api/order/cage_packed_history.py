@@ -28,6 +28,7 @@ BASE_DIR = (
     .resolve()
     .parent
     .parent
+    .parent
 )
 
 SERVICE_ACCOUNT_FILE = (
